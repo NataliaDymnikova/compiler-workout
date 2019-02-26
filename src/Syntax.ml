@@ -43,8 +43,8 @@ module Expr =
     *)
     let rec eval s e =
         match e with
-        | Const x -> x
-        | Var v -> s v
+        | Const  x         -> x
+        | Var    v         -> s v
         | Binop (op, x, y) ->
             let l = eval s x in
             let r = eval s y in
@@ -67,7 +67,7 @@ module Expr =
         and fromBool x = if x then 1 else 0
 
   end
-                    
+
 (* Simple statements: syntax and sematics *)
 module Stmt =
   struct
@@ -80,7 +80,7 @@ module Stmt =
     (* composition                      *) | Seq    of t * t with show
 
     (* The type of configuration: a state, an input stream, an output stream *)
-    type config = Expr.state * int list * int list 
+    type config = Expr.state * int list * int list
 
     (* Statement evaluator
 
@@ -88,14 +88,14 @@ module Stmt =
 
        Takes a configuration and a statement, and returns another configuration
     *)
-    let eval (s, i, o) t =
+    let rec eval (s, i, o) t =
         match t with
-        | Read v -> (Expr.update v List.hd i s, List.tl i, o)
-        | Write e -> (s, i, o @ [Expr.eval s e])
-        | Assign (v, e) -> (Expr.update x (Expr.eval s e) s, i, o)
-        | Seq (e1, e2) ->
-            let (s1, i1, o1) = eval (s, i, o) e1
-            eval (s1, i1, o1) e2
+        | Read    v       -> (Expr.update v (List.hd i) s, List.tl i, o)
+        | Write   e       -> (s, i, o @ [Expr.eval s e])
+        | Assign (v, e)   -> (Expr.update v (Expr.eval s e) s, i, o)
+        | Seq    (e1, e2) ->
+            let stmt = eval (s, i, o) e1
+            in eval stmt e2
 
   end
 
