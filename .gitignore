@@ -13,5 +13,5 @@
 *.native
 src/.depend
 regression/*.log
-regression/deep-expression/*.log
-regression/expression/*.log
+regression/deep-expressions/*.log
+regression/expressions/*.log

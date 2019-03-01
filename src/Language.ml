@@ -44,8 +44,33 @@ module Expr =
        Takes a state and an expression, and returns the value of the expression in 
        the given state.
     *)
-    let eval _ = failwith "Not implemented yet"
+    let rec eval s e =
+        match e with
+        | Const  x         -> x
+        | Var    v         -> s v
+        | Binop (op, x, y) ->
+            let l = eval s x in
+            let r = eval s y in
+            match op with
+            | "+" -> l + r
+            | "-" -> l - r
+            | "*" -> l * r
+            | "/" -> l / r
+            | "%" -> l mod r
+            | "!!" -> fromBool(toBool(l) || toBool(r))
+            | "&&" -> fromBool(toBool(l) && toBool(r))
+            | "==" -> fromBool(l == r)
+            | "!=" -> fromBool(l != r)
+            | "<" -> fromBool(l < r)
+            | "<=" -> fromBool(l <= r)
+            | ">" -> fromBool(l > r)
+            | ">=" -> fromBool(l >= r)
 
+        and toBool x = x!= 0
+        and fromBool x = if x then 1 else 0
+
+
+    let parseBinop op = ostap(- $(op)), (fun x y -> Binop (op, x, y))
     (* Expression parser. You can use the following terminals:
 
          IDENT   --- a non-empty identifier a-zA-Z[a-zA-Z0-9_]* as a string
@@ -53,7 +78,21 @@ module Expr =
    
     *)
     ostap (
-      parse: empty {failwith "Not implemented yet"}
+        expr:
+        !(Ostap.Util.expr
+            (fun x -> x)
+            (Array.map (fun (assoc, ops) -> assoc, List.map parseBinop ops)
+                [|
+                  `Lefta, ["!!"];
+                  `Lefta, ["&&"];
+                  `Nona , ["<="; "<"; ">="; ">"; "=="; "!="];
+                  `Lefta, ["+"; "-"];
+                  `Lefta, ["*"; "/"; "%"];
+                |]
+             )
+            primary
+        );
+        primary: c: DECIMAL {Const c} | x: IDENT {Var x} | -"(" expr -")"
     )
 
   end
@@ -78,11 +117,23 @@ module Stmt =
 
        Takes a configuration and a statement, and returns another configuration
     *)
-    let eval _ = failwith "Not implemented yet"
+    let rec eval (s, i, o) t =
+        match t with
+        | Read    v       -> (Expr.update v (List.hd i) s, List.tl i, o)
+        | Write   e       -> (s, i, o @ [Expr.eval s e])
+        | Assign (v, e)   -> (Expr.update v (Expr.eval s e) s, i, o)
+        | Seq    (e1, e2) ->
+            let stmt = eval (s, i, o) e1
+            in eval stmt e2
 
     (* Statement parser *)
     ostap (
-      parse: empty {failwith "Not implemented yet"}
+      line:
+          "read" "(" x:IDENT ")"         {Read x}
+        | "write" "(" e:!(Expr.expr) ")" {Write e}
+        | x:IDENT ":=" e:!(Expr.expr)    {Assign (x, e)};
+
+      parse: l:line ";" rest:parse {Seq (l, rest)} | line
     )
       
   end
