@@ -93,10 +93,7 @@ let rec compile_binop env op =
     let r, l, env = env#pop2 in
     let s, env = env#allocate in
     let asm = match op with
-        | "+" | "-" | "*" -> (match (l, r) with
-                                | (S _, S _) -> [Mov (l, eax); Binop (op, r, eax); Mov (eax, s)]
-                                | _          -> if s == l then [Binop (op, r, l)] else [Binop (op, r, l); Mov (l, s)]
-                             )
+        | "+" | "-" | "*" -> [Mov (l, eax); Binop (op, r, eax); Mov (eax, l)]
         | "/" | "%"        -> let w = if op = "/" then eax else edx in
                               [Mov (l, eax); set_zero edx; Cltd; IDiv r; Mov (w, s)]
         | "<=" | "<" | ">="
@@ -105,7 +102,7 @@ let rec compile_binop env op =
                                    | _          -> compare op l r s
                                 )
         | "!!" | "&&"       -> [set_zero eax; set_zero edx; Binop("cmp", L 0, l);
-                                Set ("ne", "%al"); Binop("cmp", L 0, r); Set ("ne", "%dl");
+                                Set ("nz", "%al"); Binop("cmp", L 0, r); Set ("nz", "%dl");
                                 Binop (op, edx, eax); Mov (eax, s)]
     in env, asm
 (* Symbolic stack machine evaluator
@@ -123,10 +120,10 @@ let rec compile env = function
             | CONST n   -> let s, env = env#allocate in env, [Mov (L n, s)]
             | WRITE     -> let v, env = env#pop      in env, [Push v; Call "Lwrite"; Pop eax]
             | READ      -> let s, env = env#allocate in env, [Call "Lread"; Mov (eax, s)]
-            | LD x      -> let s, env = env#allocate in
-                           let v      = env#loc x    in env, [Mov ((M v), s)]
-            | ST x      -> let v, env = (env#global x)# pop in
-                           let var    = env#loc x           in env, [Mov (v, (M var))]
+            | LD x      -> let s, env = (env#global x)#allocate in
+                           env, [Mov (M (env#loc x), eax); Mov (eax, s)]
+            | ST x      -> let s, env = (env#global x)#pop in
+                           env, [Mov (s, eax); Mov (eax, M (env#loc x))]
             | LABEL l   -> env, [Label l]
             | JMP l     -> env, [Jmp l]
             | CJMP (z, l) ->
