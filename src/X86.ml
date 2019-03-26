@@ -43,7 +43,7 @@ type instr =
 (* a label in the code                                  *) | Label of string
 (* a conditional jump                                   *) | CJmp  of string * string
 (* a non-conditional jump                               *) | Jmp   of string
-                                                               
+
 (* Instruction printer *)
 let show instr =
   let binop = function
@@ -51,7 +51,7 @@ let show instr =
   | "-"   -> "subl"
   | "*"   -> "imull"
   | "&&"  -> "andl"
-  | "!!"  -> "orl" 
+  | "!!"  -> "orl"
   | "^"   -> "xorl"
   | "cmp" -> "cmpl"
   | _     -> failwith "unknown binary operator"
@@ -79,6 +79,32 @@ let show instr =
 (* Opening stack machine to use instructions without fully qualified names *)
 open SM
 
+
+let rec compile_binop env op =
+    let set_zero operand = Binop("^", operand, operand) in
+    let compare_op op = (match op with
+        | "<=" -> "le"
+        | "<" -> "l"
+        | ">=" -> "ge"
+        | ">" -> "g"
+        | "==" -> "e"
+        | "!=" -> "ne") in
+    let compare op l r s = [set_zero eax; Binop ("cmp", r, l); Set (compare_op op, "%al"); Mov (eax, s)] in
+    let r, l, env = env#pop2 in
+    let s, env = env#allocate in
+    let asm = match op with
+        | "+" | "-" | "*" -> [Mov (l, eax); Binop (op, r, eax); Mov (eax, l)]
+        | "/" | "%"        -> let w = if op = "/" then eax else edx in
+                              [Mov (l, eax); set_zero edx; Cltd; IDiv r; Mov (w, s)]
+        | "<=" | "<" | ">="
+        | ">" | "==" | "!=" -> (match (l, r) with
+                                   | (S _, S _) -> [Mov (l, edx)] @ compare op edx r s
+                                   | _          -> compare op l r s
+                                )
+        | "!!" | "&&"       -> [set_zero eax; set_zero edx; Binop("cmp", L 0, l);
+                                Set ("nz", "%al"); Binop("cmp", L 0, r); Set ("nz", "%dl");
+                                Binop (op, edx, eax); Mov (eax, s)]
+    in env, asm
 (* Symbolic stack machine evaluator
 
      compile : env -> prg -> env * instr list
@@ -86,9 +112,29 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile _ = failwith "Not Implemented Yet"
+let rec compile env = function
+    | [] -> env, []
+    | instr::code ->
+        let env, asm_instr = (match instr with
+            | BINOP op  -> compile_binop env op
+            | CONST n   -> let s, env = env#allocate in env, [Mov (L n, s)]
+            | WRITE     -> let v, env = env#pop      in env, [Push v; Call "Lwrite"; Pop eax]
+            | READ      -> let s, env = env#allocate in env, [Call "Lread"; Mov (eax, s)]
+            | LD x      -> let s, env = (env#global x)#allocate in
+                           env, [Mov (M (env#loc x), eax); Mov (eax, s)]
+            | ST x      -> let s, env = (env#global x)#pop in
+                           env, [Mov (s, eax); Mov (eax, M (env#loc x))]
+            | LABEL l   -> env, [Label l]
+            | JMP l     -> env, [Jmp l]
+            | CJMP (z, l) ->
+              let s, env = env#pop in
+              env, [Binop ("cmp", L 0, s); CJmp (z, l)]
+            ) in
+        let env, asm_code = compile env code in
+        env, (asm_instr @ asm_code)
 
-(* A set of strings *)           
+
+(* A set of strings *)
 module S = Set.Make (String)
 
 (* Environment implementation *)
@@ -99,10 +145,10 @@ class env =
     val stack       = []       (* symbolic stack                    *)
 
     (* gets a name for a global variable *)
-    method loc x = "global_" ^ x                                 
+    method loc x = "global_" ^ x
 
     (* allocates a fresh position on a symbolic stack *)
-    method allocate =    
+    method allocate =
       let x, n =
 	let rec allocate' = function
 	| []                            -> ebx     , 0
@@ -130,17 +176,17 @@ class env =
     (* gets the number of allocated stack slots *)
     method allocated = stack_slots
 
-    (* gets all global variables *)      
+    (* gets all global variables *)
     method globals = S.elements globals
   end
 
 (* Compiles a unit: generates x86 machine code for the stack program and surrounds it
    with function prologue/epilogue
 *)
-let compile_unit env scode =  
+let compile_unit env scode =
   let env, code = compile env scode in
-  env, 
-  ([Push ebp; Mov (esp, ebp); Binop ("-", L (word_size*env#allocated), esp)] @ 
+  env,
+  ([Push ebp; Mov (esp, ebp); Binop ("-", L (word_size*env#allocated), esp)] @
    code @
    [Mov (ebp, esp); Pop ebp; Binop ("^", eax, eax); Ret]
   )
@@ -172,4 +218,4 @@ let build stmt name =
   close_out outf;
   let inc = try Sys.getenv "RC_RUNTIME" with _ -> "../runtime" in
   Sys.command (Printf.sprintf "gcc -m32 -o %s %s/runtime.o %s.s" name inc name)
- 
+
