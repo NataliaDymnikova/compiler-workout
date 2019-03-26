@@ -69,24 +69,42 @@ let run p i =
    Takes a program in the source language and returns an equivalent program for the
    stack machine
 *)
-let rec compile =
+let label = object
+    val mutable n = 0
+    method get s = n <- n + 1; s ^ string_of_int n
+end
+
+let rec compile_labeled p last_label =
   let rec expr = function
   | Expr.Var   x          -> [LD x]
   | Expr.Const n          -> [CONST n]
   | Expr.Binop (op, x, y) -> expr x @ expr y @ [BINOP op]
-  in
-  function
-  | Stmt.Seq (s1, s2)  -> compile s1 @ compile s2
-  | Stmt.Read x        -> [READ; ST x]
-  | Stmt.Write e       -> expr e @ [WRITE]
-  | Stmt.Assign (x, e) -> expr e @ [ST x]
+  in match p with
+  | Stmt.Seq (s1, s2)  ->
+    let new_label = label#get "l_seq" in
+    let (compiled1, used1) = compile_labeled s1 new_label in
+    let (compiled2, used2) = compile_labeled s2 last_label in
+    compiled1 @ (if used1 then [LABEL new_label] else []) @ compiled2, used2
+  | Stmt.Read x        -> [READ; ST x], false
+  | Stmt.Write e       -> expr e @ [WRITE], false
+  | Stmt.Assign (x, e) -> expr e @ [ST x], false
   | Stmt.While (e, s)  ->
-    let r = string_of_int (Random.int 10000) in
-    [JMP ("l_check"^r); LABEL ("l_loop"^r)] @ compile s @ [LABEL ("l_check"^r)] @ expr e @ [CJMP ("nz", ("l_loop"^r))]
+    let check = label#get "l_check" in
+    let loop = label#get "l_loop" in
+    let (compiled, _) = compile_labeled s check in
+    [JMP check; LABEL loop] @ compiled @ [LABEL check] @ expr e @ [CJMP ("nz", loop)], false
   | Stmt.If (e, s1, s2)  ->
-    let r = string_of_int (Random.int 10000) in
-    expr e @ [CJMP ("z", ("l_else"^r))] @ compile s1 @ [JMP ("l_end"^r); LABEL ("l_else"^r)] @ compile s2 @ [LABEL ("l_end"^r)]
-  | Stmt.Skip          -> []
+    let l_else = label#get "l_else" in
+    let (if_body, used1) = compile_labeled s1 last_label in
+    let (else_body, used2) = compile_labeled s2 last_label in
+    expr e @ [CJMP ("z", l_else)] @ if_body @ (if used1 then [] else [JMP last_label]) @ [LABEL l_else] @ else_body @ (if used2 then [] else [JMP last_label]), true
+  | Stmt.Skip          -> [], false
   | Stmt.Repeat (s, e) ->
-      let r = string_of_int (Random.int 10000) in
-      [LABEL ("l_repeat"^r)] @ compile s @ expr e @ [CJMP ("z", ("l_repeat"^r))]
+      let l_repeat = label#get "l_repeat" in
+      let (compiled, _) = compile_labeled s last_label in
+      [LABEL l_repeat] @ compiled @ expr e @ [CJMP ("z", l_repeat)], false
+
+let rec compile p =
+    let l = label#get "l_end" in
+    let compiled, used = compile_labeled p l in
+    compiled @ (if used then [LABEL l] else [])
