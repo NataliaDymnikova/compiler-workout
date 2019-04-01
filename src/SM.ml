@@ -36,8 +36,8 @@ let rec eval env ((cst, st, ((s, i, o) as c)) as conf) prg =
     match prg with
     | []            -> (cst, st, (s, i, o))
     | BINOP op :: p ->
-        let y :: x :: st1 = st in
-        eval env (cst, Expr.to_func op x y :: st1, (s, i, o)) p
+        let y :: x :: st = st in
+        eval env (cst, Expr.to_func op x y :: st, (s, i, o)) p
     | CONST c  :: p -> eval env (cst, c :: st, (s, i, o)) p
     | READ     :: p -> eval env (cst, (List.hd i) :: st, (s, List.tl i, o)) p
     | WRITE    :: p -> eval env (cst, List.tl st, (s, i, o @ [List.hd st])) p
@@ -90,6 +90,9 @@ let rec compile_labeled p last_label =
   | Expr.Var   x          -> [LD x]
   | Expr.Const n          -> [CONST n]
   | Expr.Binop (op, x, y) -> expr x @ expr y @ [BINOP op]
+  | Expr.Call (f, args)   ->
+    let compile_args = List.concat (List.map (expr) (List.rev args)) in
+    compile_args @ [CALL (f, List.length args, true)]
   in match p with
   | Stmt.Seq (s1, s2)  ->
     let new_label = label#get "l_seq" in

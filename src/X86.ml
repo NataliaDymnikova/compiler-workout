@@ -118,7 +118,8 @@ let rec compile_binop env op =
 *)
 
 let rec init_impl n = if n < 0 then [] else n :: init_impl (n - 1)
-let list_init n = List.rev (init_impl n)
+let list_init n = List.rev (init_impl (n - 1))
+
 let rec compile env = function
     | [] -> env, []
     | instr::code ->
@@ -144,8 +145,9 @@ let rec compile env = function
                 env, push_args @ [Call name; Binop ("+", L (arg_cnt * word_size), esp)] @ get_res
             | BEGIN (name, args, locals) ->
                 let push_regs = List.map (fun x -> Push (R x)) (list_init num_of_regs) in
+                let prolog = [Push ebp; Mov (esp, ebp)] in
                 let env = env#enter name args locals in
-                env, [Push ebp; Mov (esp, ebp)] @ push_regs @ [Binop ("-", M ("$" ^ env#lsize), esp)]
+                env, prolog @ push_regs @ [Binop ("-", M ("$" ^ env#lsize), esp)]
             | END ->
                 let pop_regs = List.map (fun x -> Pop (R x)) (List.rev (list_init num_of_regs)) in
                 let meta = [Meta (Printf.sprintf "\t.set %s, %d" env#lsize (env#allocated * word_size))] in
@@ -156,6 +158,7 @@ let rec compile env = function
                 then let a,env = env#pop in
                      env, [Mov (a, eax); Jmp env#epilogue]
                 else env, [Jmp env#epilogue]
+            | _ -> failwith  "Wrong instraction"
             ) in
         let env, asm_code = compile env code in
         env, (asm_instr @ asm_code)

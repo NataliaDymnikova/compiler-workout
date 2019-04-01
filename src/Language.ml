@@ -88,8 +88,8 @@ module Expr =
       | "<=" -> bti |> (<=)
       | ">"  -> bti |> (> )
       | ">=" -> bti |> (>=)
-      | "==" -> bti |> (= )
-      | "!=" -> bti |> (<>)
+      | "==" -> bti |> (==)
+      | "!=" -> bti |> (!=)
       | "&&" -> fun x y -> bti (itb x && itb y)
       | "!!" -> fun x y -> bti (itb x || itb y)
       | _    -> failwith (Printf.sprintf "Unknown binary operator %s" op)
@@ -118,7 +118,7 @@ module Expr =
     	    !(Ostap.Util.expr
                 (fun x -> x)
     	        (Array.map (fun (a, s) -> a,
-                               List.map  (fun s -> ostap(- $(s)), (fun x y -> Binop (s, x, y))) s
+                               List.map  (fun s -> ostap($(s)), (fun x y -> Binop (s, x, y))) s
                             )
                   [|
     		        `Lefta, ["!!"];
@@ -132,9 +132,8 @@ module Expr =
 
           primary:
             n:DECIMAL {Const n}
-          | x:IDENT   {Var x}
           | -"(" parse -")"
-          | name:IDENT p:("(" args:!(Util.list0 parse) ")" {Call (name, args)} | empty {Var name}) {p}
+          | name:IDENT p:("(" args:!(Ostap.Util.list0 parse) ")" {Call (name, args)} | empty {Var name}) {p}
     )
     
   end
@@ -168,7 +167,7 @@ module Stmt =
         | _ -> match y with
             | Skip -> x
             | _ -> Seq(x, y)
-
+    let reverse_condition cond = Expr.Binop ("==", cond, Expr.Const 0)
     let rec eval env ((st, i, o, r) as conf) k stmt =
         match stmt with
         | Read    v       -> eval env (State.update v (List.hd i) st, List.tl i, o, None) Skip k
@@ -184,12 +183,12 @@ module Stmt =
             | _ -> eval env conf Skip k)
         | If (e1, e2, e3) ->
             let (st, i, o, Some r) = Expr.eval env conf e1 in
-            eval env (st, i, o, None) k (if r != 0 then e2 else e3)
+            eval env (st, i, o, None) k (if r <> 0 then e2 else e3)
         | While (e1, e2)  ->
             let (st, i, o, Some r) = Expr.eval env conf e1 in
             if r != 0 then eval env (st, i, o, None) (asSeq stmt k) e2 else eval env (st, i, o, None) Skip k
         | Repeat (e1, e2) ->
-            eval env conf (asSeq (While (e2, e1)) k) e1
+            eval env conf (asSeq (While (reverse_condition e2, e1)) k) e1
         | Call (name, args) -> eval env (Expr.eval env conf (Expr.Call (name, args))) Skip k
         | Return x        -> (match x with
             | Some x -> Expr.eval env conf x
@@ -198,26 +197,30 @@ module Stmt =
     (* Statement parser *)
     ostap (
       line:
-          "read" "(" x:IDENT ")"         {Read x}
+          "read" "(" x:IDENT ")"          {Read x}
         | "write" "(" e:!(Expr.parse) ")" {Write e}
         | x:IDENT ":=" e:!(Expr.parse)    {Assign (x, e)}
-        | "if" e1:!(Expr.parse) "then" e2:parse "else" e3:parse "fi" {If (e1, e2, e3)}
-        | "if" e1:!(Expr.parse) "then" e2:parse "fi" {If (e1, e2, Skip)}
-        | "if" e1:!(Expr.parse) "then" e2:parse e3:elif {If (e1, e2, e3)}
+        | "if" e1:!(Expr.parse)
+            "then" e2:!(parse)
+            elif:(%"elif" !(Expr.parse) %"then" !(parse))*
+            els:(%"else" !(parse))?
+            "fi"
+            {
+                let else_body = match els with
+                        | Some x -> x
+                        | _ -> Skip
+                in let t = List.fold_right (fun (cond, body) curr -> If (cond, body, curr)) elif else_body in
+                If (e1, e2, t)
+            }
         | "skip" {Skip}
         | "while" e1:!(Expr.parse) "do" e2:parse "od" {While (e1, e2)}
         | "repeat" e1:parse "until" e2:!(Expr.parse) {Repeat (e1, e2)}
         | "for" e1:parse "," e2:!(Expr.parse) "," e3:parse "do" s:parse "od" {Seq (e1, While (e2, Seq(s, e3)))}
-        | name:IDENT "(" args:(!(Expr.parse))* ")" {Call (name, args)}
+        | name:IDENT "(" args:!(Ostap.Util.list0 Expr.parse) ")" {Call (name, args)}
         | "return" e:!(Expr.parse)? { Return e };
 
       parse:
-          l:line ";" rest:parse {Seq (l, rest)} | line;
-
-      elif:
-          "elif" e1:!(Expr.parse) "then" e2:parse "else" e3:parse "fi" {If (e1, e2, e3)}
-        | "elif" e1:!(Expr.parse) "then" e2:parse "fi" {If (e1, e2, Skip)}
-        | "elif" e1:!(Expr.parse) "then" e2:parse e3:elif {If (e1, e2, e3)}
+          l:line ";" rest:parse {Seq (l, rest)} | line
     )
       
   end
@@ -230,7 +233,8 @@ module Definition =
     type t = string * (string list * string list * Stmt.t)
 
     ostap (
-      parse: "fun" name:IDENT "(" args:(IDENT)* ")" local:(%"local" (IDENT)*)? "{" body:!(Stmt.parse) "}"
+        arg: IDENT;
+        parse: "fun" name:IDENT "(" args:!(Util.list0 arg) ")" local:(%"local" !(Util.list arg))? "{" body:!(Stmt.parse) "}"
         {
             let local = match local with
             | Some x -> x
