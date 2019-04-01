@@ -73,16 +73,68 @@ module Expr =
 
        which takes an environment (of the same type), a name of the function, a list of actual parameters and a configuration, 
        an returns resulting configuration
-    *)                                                       
-    let rec eval env ((st, i, o, r) as conf) expr = failwith "Not implemented"
-         
+    *)
+    let to_func op =
+      let bti   = function true -> 1 | _ -> 0 in
+      let itb b = b <> 0 in
+      let (|>) f g   = fun x y -> f (g x y) in
+      match op with
+      | "+"  -> (+)
+      | "-"  -> (-)
+      | "*"  -> ( * )
+      | "/"  -> (/)
+      | "%"  -> (mod)
+      | "<"  -> bti |> (< )
+      | "<=" -> bti |> (<=)
+      | ">"  -> bti |> (> )
+      | ">=" -> bti |> (>=)
+      | "==" -> bti |> (= )
+      | "!=" -> bti |> (<>)
+      | "&&" -> fun x y -> bti (itb x && itb y)
+      | "!!" -> fun x y -> bti (itb x || itb y)
+      | _    -> failwith (Printf.sprintf "Unknown binary operator %s" op)
+
+    let rec eval env ((s, i, o, _) as conf) expr =
+      match expr with
+      | Const n -> (s, i, o, Some n)
+      | Var   x -> (s, i, o, Some State.eval s x)
+      | Binop (op, x, y) ->
+        let (s, i, o, Some r1) = eval env conf x in
+        let (s, i, o, Some r2) = eval env (s, i, o, None) y in
+        (s, i, o, Some to_func op r1 r2)
+      | Call (f, args)   ->
+        let (s, i, o, args) = List.fold_left (fun (s, i, o, args) arg ->
+            let (s, i, o, Some res) = eval env (s, i, o, None) arg in
+            (s, i, o, args @ [res])) (s, i, o, []) args in
+        env#definition env f args (s, i, o, None)
+
     (* Expression parser. You can use the following terminals:
 
          IDENT   --- a non-empty identifier a-zA-Z[a-zA-Z0-9_]* as a string
-         DECIMAL --- a decimal constant [0-9]+ as a string                                                                                                                  
+         DECIMAL --- a decimal constant [0-9]+ as a string
     *)
-    ostap (                                      
-      parse: empty {failwith "Not implemented"}
+    ostap (
+        parse:
+    	    !(Ostap.Util.expr
+                (fun x -> x)
+    	        (Array.map (fun (a, s) -> a,
+                               List.map  (fun s -> ostap(- $(s)), (fun x y -> Binop (s, x, y))) s
+                            )
+                  [|
+    		        `Lefta, ["!!"];
+    		        `Lefta, ["&&"];
+    		        `Nona , ["=="; "!="; "<="; "<"; ">="; ">"];
+    		        `Lefta, ["+" ; "-"];
+    		        `Lefta, ["*" ; "/"; "%"];
+                  |]
+    	     )
+    	     primary);
+
+          primary:
+            n:DECIMAL {Const n}
+          | x:IDENT   {Var x}
+          | -"(" parse -")"
+          | name:IDENT p:("(" args:!(Util.list0 parse) ")" {Call (name, args)} | empty {Var name}) {p}
     )
     
   end
@@ -111,11 +163,61 @@ module Stmt =
        Takes an environment, a configuration and a statement, and returns another configuration. The 
        environment is the same as for expressions
     *)
-    let rec eval env ((st, i, o, r) as conf) k stmt = failwith "Not implemnted"
-         
+    let asSeq x y = match x with
+        | Skip -> y
+        | _ -> match y with
+            | Skip -> x
+            | _ -> Seq(x, y)
+
+    let rec eval env ((st, i, o, r) as conf) k stmt =
+        match stmt with
+        | Read    v       -> eval env (State.update v (List.hd i) st, List.tl i, o, None) Skip k
+        | Write   e       ->
+            let (st, i, o, Some r) = Expr.eval env conf e in
+            eval env (st, i, o @ [r], None) Skip k
+        | Assign (v, e)   ->
+            let (s, i, o, Some r) = Expr.eval env conf e in
+            eval env (State.update v r st, i, o, Some r) Skip k
+        | Seq    (e1, e2) -> eval env conf (asSeq e2 k) e1
+        | Skip            -> (match k with
+            | Skip -> conf
+            | _ -> eval env conf Skip k)
+        | If (e1, e2, e3) ->
+            let (st, i, o, Some r) = Expr.eval env conf e1 in
+            eval env (st, i, o, None) k (if r != 0 then e2 else e3)
+        | While (e1, e2)  ->
+            let (st, i, o, Some r) = Expr.eval env conf e1 in
+            if r != 0 then eval env (st, i, o, None) (asSeq stmt k) e2 else eval env (st, i, o, None) Skip k
+        | Repeat (e1, e2) ->
+            eval env conf (asSeq (While (e2, e1)) k) e1
+        | Call (name, args) -> eval env (Expr.eval env conf (Expr.Call (name, args))) Skip k
+        | Return x        -> (match x with
+            | Some x -> Expr.eval env conf x
+            | _ -> (st, i, o, None))
+
     (* Statement parser *)
     ostap (
-      parse: empty {failwith "Not implemented"}
+      line:
+          "read" "(" x:IDENT ")"         {Read x}
+        | "write" "(" e:!(Expr.parse) ")" {Write e}
+        | x:IDENT ":=" e:!(Expr.parse)    {Assign (x, e)}
+        | "if" e1:!(Expr.parse) "then" e2:parse "else" e3:parse "fi" {If (e1, e2, e3)}
+        | "if" e1:!(Expr.parse) "then" e2:parse "fi" {If (e1, e2, Skip)}
+        | "if" e1:!(Expr.parse) "then" e2:parse e3:elif {If (e1, e2, e3)}
+        | "skip" {Skip}
+        | "while" e1:!(Expr.parse) "do" e2:parse "od" {While (e1, e2)}
+        | "repeat" e1:parse "until" e2:!(Expr.parse) {Repeat (e1, e2)}
+        | "for" e1:parse "," e2:!(Expr.parse) "," e3:parse "do" s:parse "od" {Seq (e1, While (e2, Seq(s, e3)))}
+        | name:IDENT "(" args:(!(Expr.parse))* ")" {Call (name, args)}
+        | "return" e:!(Expr.parse)? { Return e };
+
+      parse:
+          l:line ";" rest:parse {Seq (l, rest)} | line;
+
+      elif:
+          "elif" e1:!(Expr.parse) "then" e2:parse "else" e3:parse "fi" {If (e1, e2, e3)}
+        | "elif" e1:!(Expr.parse) "then" e2:parse "fi" {If (e1, e2, Skip)}
+        | "elif" e1:!(Expr.parse) "then" e2:parse e3:elif {If (e1, e2, e3)}
     )
       
   end
@@ -127,8 +229,14 @@ module Definition =
     (* The type for a definition: name, argument list, local variables, body *)
     type t = string * (string list * string list * Stmt.t)
 
-    ostap (     
-      parse: empty {failwith "Not implemented"}
+    ostap (
+      parse: "fun" name:IDENT "(" args:(IDENT)* ")" local:(%"local" (IDENT)*)? "{" body:!(Stmt.parse) "}"
+        {
+            let local = match local with
+            | Some x -> x
+            | _ -> [] in
+            name, (args, local, body)
+        }
     )
 
   end
