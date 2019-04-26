@@ -154,29 +154,54 @@ let label = object
     method get s = n <- n + 1; s ^ string_of_int n
 end
 
+(* Assume that on the top of the stack there is already a duplicated version of element *)
+let rec match_pattern lFalse depth = function
+  | Stmt.Pattern.Wildcard | Stmt.Pattern.Ident _ -> false, [DROP]
+  | Stmt.Pattern.Sexp (t, ps) -> true, [TAG t] @ [ZJMPDROP (lFalse, depth)] @
+    (List.flatten @@ List.mapi (fun i p -> [DUP; CONST i; CALL (".elem", 2, false)] @
+        (match p with
+        | Stmt.Pattern.Sexp (_, ps') ->
+            if List.length ps' > 0 then [DUP] @ snd (match_pattern lFalse (depth + 1) p) @ [DROP]
+            else snd (match_pattern lFalse depth p)
+        | _ -> snd (match_pattern lFalse depth p))
+      ) ps)
+
+let rec make_bindings p =
+  let rec inner p' = match p' with
+    | Stmt.Pattern.Wildcard -> []
+    | Stmt.Pattern.Ident var -> [[]]
+    | Stmt.Pattern.Sexp (_, xs) ->
+       let next i x = List.map (fun arr -> i::arr) (inner x) in
+       List.flatten (List.mapi next xs) in
+  let topElem i = [CONST i; CALL (".elem", 2, false)] in
+  let extractBindValue path = [DUP] @ (List.flatten (List.map topElem path)) @ [SWAP] in
+  List.flatten (List.map extractBindValue (List.rev (inner p)))
+
 let rec compile_labeled p last_label =
   let rec expr = function
   | Expr.Var   x          -> [LD x]
   | Expr.Const n          -> [CONST n]
   | Expr.String n         -> [STRING n]
-  | Expr.Array a          -> List.flatten (List.map (expr) (List.rev a)) @ [CALL ("$array", List.length a, true)]
-  | Expr.Elem (a, i)      -> expr i @ expr a @ [CALL ("$elem", 2, true)]
-  | Expr.Length n         -> expr n @ [CALL ("$length", 1, true)]
+  | Expr.Array a          ->
+    let compiled = List.flatten (List.map expr a) in
+    compiled @ [CALL (".array", (List.length compiled), false)]
+  | Expr.Elem (a, i)      -> expr a @ expr i @ [CALL (".elem", 2, false)]
+  | Expr.Length n         -> expr n @ [CALL (".length", 1, false)]
   | Expr.Binop (op, x, y) -> expr x @ expr y @ [BINOP op]
-  | Expr.Call (f, args)   ->
-    let compile_args = List.flatten (List.map (expr) (List.rev args)) in
-    compile_args @ [CALL (f, List.length args, true)]
+  | Expr.Call (f, args) ->
+    let compile_args = List.flatten @@ List.map expr args in
+    compile_args @ [CALL (f, List.length args, false)]
+  | Expr.Sexp (t, xs)     ->
+    let compiled = List.flatten (List.map expr xs) in
+    compiled @ [SEXP (t, List.length xs)]
   in match p with
   | Stmt.Seq (s1, s2)  ->
     let new_label = label#get "l_seq" in
     let (compiled1, used1) = compile_labeled s1 new_label in
     let (compiled2, used2) = compile_labeled s2 last_label in
     compiled1 @ (if used1 then [LABEL new_label] else []) @ compiled2, used2
-  | Stmt.Assign (x, ids, e) -> (match ids with
-    | [] -> expr e @ [ST x], false
-    | ids ->
-        let ids = List.fold_left (fun p id -> p @ (expr id)) [] (List.rev ids) in
-        ids @ expr e @ [STA (x, List.length ids)], false)
+  | Stmt.Assign (x, [], e) -> (expr e @ [ST x]), false
+  | Stmt.Assign (x, is, e) -> List.flatten (List.map expr (is @ [e])) @ [STA (x, List.length is)], false
   | Stmt.While (e, s)  ->
     let check = label#get "l_check" in
     let loop = label#get "l_loop" in
@@ -186,17 +211,37 @@ let rec compile_labeled p last_label =
     let l_else = label#get "l_else" in
     let (if_body, used1) = compile_labeled s1 last_label in
     let (else_body, used2) = compile_labeled s2 last_label in
-    expr e @ [CJMP ("z", l_else)] @ if_body @ (if used1 then [] else [JMP last_label]) @ [LABEL l_else] @ else_body @ (if used2 then [] else [JMP last_label]), true
+    expr e @ [CJMP ("z", l_else)]
+        @ if_body @ (if used1 then [] else [JMP last_label]) @ [LABEL l_else]
+        @ else_body @ (if used2 then [] else [JMP last_label]), true
   | Stmt.Skip          -> [], false
   | Stmt.Repeat (s, e) ->
     let l_repeat = label#get "l_repeat" in
     let (compiled, _) = compile_labeled s last_label in
     [LABEL l_repeat] @ compiled @ expr e @ [CJMP ("z", l_repeat)], false
   | Stmt.Call (f, args) ->
-    List.concat (List.map (expr) (List.rev args)) @ [CALL (f, List.length args, false)], false
+    let compile_args = List.flatten @@ List.map expr args in
+    compile_args @ [CALL (f, List.length args, true)], false
   | Stmt.Return e       -> (match e with
                             | Some x -> (expr x) @ [RET true]
                             | _ -> [RET false]), false
+  | Stmt.Leave            -> [LEAVE], false
+  | Stmt.Case (e, [p, s]) -> (* TODO: Reverse match_pattern return tuple *)
+    let pUsed, pCode = match_pattern last_label 0 p in
+    let sBody, sUsed = compile_labeled (Stmt.Seq (s, Stmt.Leave)) last_label in
+    expr e @ [DUP] @ pCode @ make_bindings p @ [DROP; ENTER (List.rev (Stmt.Pattern.vars p))] @ sBody, pUsed || sUsed
+  | Stmt.Case (e, bs)      ->
+    let n = List.length bs - 1 in
+    let _, _, code = List.fold_left
+        (fun (l, i, code) (p, s) ->
+            let lFalse, jmp = if i = n then last_label, []
+                else label#get "l_case", [JMP last_label] in
+             let _, pCode = match_pattern lFalse 0 p in
+             let sBody, _ = compile_labeled (Stmt.Seq (s, Stmt.Leave)) last_label in
+             let amLabel = match l with Some x -> [LABEL x; DUP] | None -> [] in
+             (Some lFalse, i + 1, (amLabel @ pCode @ make_bindings p @ [DROP; ENTER (List.rev (Stmt.Pattern.vars p))] @ sBody @ jmp) :: code)
+                ) (None, 0, []) bs in
+        expr e @ [DUP] @ List.flatten @@ List.rev code, true
 
 let rec compile_main p =
     let l = label#get "l_main" in
